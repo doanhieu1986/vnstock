@@ -8,5 +8,8 @@ s3fs>=2024.2.0
 fsspec>=2024.2.0
 python-dotenv>=1.0
 
+# Query engine (Trino)
+trino>=0.328.0
+
 # Test
 pytest>=8.0

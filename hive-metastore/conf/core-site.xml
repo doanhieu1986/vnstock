@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!--
+  Cấu hình S3A để Hive Metastore validate/tạo LOCATION (s3a://lakehouse/...)
+  trỏ vào MinIO khi CREATE SCHEMA/TABLE. Key/secret khớp default MinIO
+  (minioadmin/minioadmin) — đổi nếu đổi MINIO_ACCESS_KEY/SECRET_KEY trong .env.
+-->
+<configuration>
+  <property>
+    <name>fs.s3a.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+  <property>
+    <name>fs.s3a.endpoint</name>
+    <value>http://minio:9000</value>
+  </property>
+  <property>
+    <name>fs.s3a.access.key</name>
+    <value>minioadmin</value>
+  </property>
+  <property>
+    <name>fs.s3a.secret.key</name>
+    <value>minioadmin</value>
+  </property>
+  <property>
+    <name>fs.s3a.path.style.access</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.connection.ssl.enabled</name>
+    <value>false</value>
+  </property>
+</configuration>

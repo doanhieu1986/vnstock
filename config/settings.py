@@ -26,6 +26,12 @@ class Settings:
     bucket: str = _get("LAKEHOUSE_BUCKET", "lakehouse")
     bronze_prefix: str = _get("BRONZE_PREFIX", "bronze")
 
+    # Trino (query engine trên Bronze/Silver)
+    trino_host: str = _get("TRINO_HOST", "localhost")
+    trino_port: int = int(_get("TRINO_PORT", "8080") or 8080)
+    trino_catalog: str = "hive"
+    trino_schema: str = "bronze"
+
     # vnstock
     vnstock_source: str = _get("VNSTOCK_SOURCE", "KBS")
     vnstock_api_key: str = _get("VNSTOCK_API_KEY", "")

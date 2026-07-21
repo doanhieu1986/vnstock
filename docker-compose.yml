@@ -1,5 +1,6 @@
 # MinIO — object store đóng vai trò Data Lake cho tầng Bronze.
-# Chỉ dựng MinIO ở giai đoạn này; Spark/Trino/Airflow sẽ gắn vào ở các phase sau.
+# + Hive Metastore (Postgres-backed) và Trino — query engine đọc trực tiếp Bronze
+#   (Parquet phân vùng thư mục, chưa phải Iceberg). Spark/Airflow sẽ gắn vào sau.
 services:
   minio:
     image: minio/minio:latest          # có image arm64 chính thức, chạy tốt trên M-series
@@ -33,5 +34,55 @@ services:
       echo '==> Bucket lakehouse san sang';
       "
 
+  # DB backend cho Hive Metastore (bảng metadata: schema/table/partition).
+  # Image hive-metastore bên dưới có sẵn schematool -dbType mysql -> phải dùng MySQL.
+  metastore-db:
+    image: mysql:8.0
+    container_name: lakehouse-metastore-db
+    command: --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_DATABASE: metastore_db
+      MYSQL_USER: ${HIVE_METASTORE_DB_USER:-hive}
+      MYSQL_PASSWORD: ${HIVE_METASTORE_DB_PASSWORD:-hive}
+      MYSQL_ROOT_PASSWORD: ${HIVE_METASTORE_DB_PASSWORD:-hive}
+    volumes:
+      - metastore-db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${HIVE_METASTORE_DB_PASSWORD:-hive}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Hive Metastore độc lập: cho Trino biết bảng nào trỏ vào đâu trên MinIO.
+  # Không có env var tiện cho JDBC/S3 -> ghi đè bằng file conf trong hive-metastore/conf/.
+  hive-metastore:
+    image: bitsondatadev/hive-metastore:latest
+    container_name: lakehouse-hive-metastore
+    depends_on:
+      metastore-db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      METASTORE_DB_HOSTNAME: metastore-db
+    volumes:
+      - ./hive-metastore/conf/metastore-site.xml:/opt/apache-hive-metastore-3.0.0-bin/conf/metastore-site.xml:ro
+      - ./hive-metastore/conf/core-site.xml:/opt/hadoop-3.2.0/etc/hadoop/core-site.xml:ro
+
+  # Query engine: đọc Bronze qua Hive connector (Parquet phân vùng thư mục).
+  trino:
+    image: trinodb/trino:latest
+    container_name: lakehouse-trino
+    depends_on:
+      - hive-metastore
+    ports:
+      - "8080:8080"          # Web UI + client API
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+
 volumes:
   minio-data:
+  metastore-db-data:

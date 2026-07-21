@@ -27,10 +27,12 @@ cho Silver.
 ## Chạy nhanh
 
 ```bash
-# 1. Bật MinIO (tự tạo bucket 'lakehouse')
+# 1. Bật toàn bộ service: MinIO (data lake) + metastore-db/hive-metastore/trino
+#    (query engine). Lần đầu sẽ mất chút thời gian để hive-metastore init schema.
 cp .env.example .env
 docker compose up -d
-#   Console: http://localhost:9001  (minioadmin / minioadmin)
+#   MinIO console: http://localhost:9001  (minioadmin / minioadmin)
+#   Trino Web UI : http://localhost:8080
 
 # 2. Cài thư viện Python (nên dùng venv)
 python -m venv .venv && source .venv/bin/activate
@@ -46,10 +48,45 @@ python scripts/run_bronze_ingest.py ohlcv --vn30 --limit 3 \
 # 5. Nạp các mã tự chọn
 python scripts/run_bronze_ingest.py ohlcv --symbols VNM,FPT,ACB \
     --start 2024-01-01 --end 2024-12-31
+
+# 6. Đăng ký bảng Trino trỏ vào Bronze + đồng bộ partition vừa nạp
+#    Chạy lại bước này sau mỗi lần ingest để nạp partition mới.
+python scripts/register_trino_tables.py
+
+# 7. Query thử qua Trino
+python -c "
+import trino
+conn = trino.dbapi.connect(host='localhost', port=8080, user='vnstock', catalog='hive', schema='bronze')
+cur = conn.cursor()
+cur.execute('SELECT symbol, count(*) FROM hive.bronze.ohlcv GROUP BY symbol')
+print(cur.fetchall())
+"
 ```
 
-Sau khi chạy, mở console MinIO (cổng 9001) → bucket `lakehouse` → thư mục
-`bronze/` để xem cây partition và các file Parquet.
+Sau khi ingest, mở console MinIO (cổng 9001) → bucket `lakehouse` → thư mục
+`bronze/` để xem cây partition và các file Parquet, hoặc query trực tiếp qua
+Trino như bước 7.
+
+## Query engine (Trino)
+
+Trino đọc trực tiếp Bronze qua Hive connector (chưa có Iceberg nên là bảng
+external trỏ vào thư mục Parquet có sẵn, không phải bảng managed). Stack:
+
+```
+MinIO (bronze/*.parquet) ◄── hive-metastore ◄── trino
+                              (biết bảng trỏ    (query engine,
+                               vào đâu)          đọc qua Hive connector)
+                              JDBC ▲
+                                   │
+                              metastore-db (MySQL)
+```
+
+- Cấu hình catalog Trino: `trino/catalog/hive.properties`.
+- Conf riêng cho `hive-metastore` (JDBC tới MySQL, S3A tới MinIO — image gốc
+  không có env var tiện để chỉnh 2 thứ này): `hive-metastore/conf/`.
+- Script đăng ký bảng: `scripts/register_trino_tables.py` — idempotent, an
+  toàn chạy lại nhiều lần (dùng `CREATE ... IF NOT EXISTS` +
+  `sync_partition_metadata`).
 
 ## Kiểm thử (không cần MinIO/vnstock)
 
@@ -83,12 +120,16 @@ src/fetchers/vnstock_fetcher.py # adapter vnstock v4 (cô lập tại đây)
 src/bronze/writer.py            # ghi Parquet + metadata + idempotency + manifest
 src/pipelines/ingest_ohlcv.py   # pipeline OHLCV
 src/pipelines/ingest_symbols.py # pipeline danh sách mã
-scripts/run_bronze_ingest.py    # CLI
+scripts/run_bronze_ingest.py    # CLI ingest
+scripts/register_trino_tables.py # đăng ký bảng Trino + sync partition
+trino/catalog/hive.properties   # cấu hình Trino Hive connector
+hive-metastore/conf/            # JDBC (MySQL) + S3A (MinIO) cho Hive Metastore
 tests/test_bronze_writer.py     # test tầng Bronze
 ```
 
 ## Bước tiếp theo (chưa làm ở phase này)
 
 - Bọc `run_bronze_ingest.py` thành Airflow DAG (schedule hằng ngày sau phiên).
-- Silver: chuẩn hoá schema, ép kiểu, khử trùng lặp → ghi bảng Iceberg.
-- Gắn Trino/DuckDB để query trực tiếp trên Bronze/Silver.
+- Silver: chuẩn hoá schema, ép kiểu, khử trùng lặp → ghi bảng Iceberg (đổi
+  catalog Trino từ Hive external table sang Iceberg connector).
+- RAG (FastEmbed + Qdrant), Metric (Cube.js), Reports (Metabase), Chainlit.
