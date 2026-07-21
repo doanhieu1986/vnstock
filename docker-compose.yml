@@ -1,0 +1,37 @@
+# MinIO — object store đóng vai trò Data Lake cho tầng Bronze.
+# Chỉ dựng MinIO ở giai đoạn này; Spark/Trino/Airflow sẽ gắn vào ở các phase sau.
+services:
+  minio:
+    image: minio/minio:latest          # có image arm64 chính thức, chạy tốt trên M-series
+    container_name: lakehouse-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"                     # S3 API endpoint
+      - "9001:9001"                     # Web console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Job chạy 1 lần: tạo sẵn bucket 'lakehouse' để pipeline có chỗ ghi.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      mc mb --ignore-existing local/lakehouse;
+      mc anonymous set none local/lakehouse;
+      echo '==> Bucket lakehouse san sang';
+      "
+
+volumes:
+  minio-data:

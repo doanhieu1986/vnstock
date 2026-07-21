@@ -1,0 +1,12 @@
+# Data source
+vnstock>=4.0.0
+
+# Bronze processing & object store
+pandas>=2.0
+pyarrow>=15.0
+s3fs>=2024.2.0
+fsspec>=2024.2.0
+python-dotenv>=1.0
+
+# Test
+pytest>=8.0
