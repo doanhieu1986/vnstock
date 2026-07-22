@@ -11,7 +11,31 @@ Tham chiếu API v4 (28-04-2026):
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import pandas as pd
+
+
+def _estimate_count(start: str, end: str, interval: str) -> int:
+    """Ước lượng số nến cần lấy để KHÔNG bị vnstock cắt bớt.
+
+    `Market().equity().ohlcv()` có tham số `count` (mặc định 100), được
+    chuyển thẳng thành `count_back` cho provider bên dưới — provider luôn
+    làm `df.tail(count_back)` SAU KHI đã lọc theo start/end, nên nếu không
+    truyền `count` đủ lớn, khoảng ngày rộng vẫn bị cắt còn đúng 100 dòng
+    cuối bất kể start/end yêu cầu bao nhiêu.
+    """
+    days = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).days + 1
+    unit = interval.strip().upper()[-1] if interval else "D"
+    if unit == "D":
+        bars_per_day = 1
+    elif unit == "W":
+        return days // 7 + 20
+    elif unit == "M":
+        return days // 28 + 20
+    else:  # intraday (1H, 15m, ...) — biên rộng, không phiên nào nhiều nến hơn mức này
+        bars_per_day = 50
+    return days * bars_per_day + 20
 
 
 class VNStockFetcher:
@@ -48,7 +72,8 @@ class VNStockFetcher:
         Tầng Bronze cố ý giữ nguyên schema gốc; mọi chuẩn hoá để dành cho Silver.
         """
         df = self._market.equity(symbol).ohlcv(
-            start=start, end=end, interval=interval
+            start=start, end=end, interval=interval,
+            count=_estimate_count(start, end, interval),
         )
         if not isinstance(df, pd.DataFrame):
             df = pd.DataFrame(df)

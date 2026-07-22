@@ -27,12 +27,14 @@ cho Silver.
 ## Chạy nhanh
 
 ```bash
-# 1. Bật toàn bộ service: MinIO (data lake) + metastore-db/hive-metastore/trino
-#    (query engine). Lần đầu sẽ mất chút thời gian để hive-metastore init schema.
+# 1. Bật toàn bộ service: MinIO + metastore-db/hive-metastore/trino (query engine)
+#    + airflow-db/airflow-webserver/airflow-scheduler (orchestration).
+#    Lần đầu sẽ lâu hơn: build image Airflow tuỳ biến + hive-metastore init schema.
 cp .env.example .env
 docker compose up -d
-#   MinIO console: http://localhost:9001  (minioadmin / minioadmin)
-#   Trino Web UI : http://localhost:8080
+#   MinIO console : http://localhost:9001  (minioadmin / minioadmin)
+#   Trino Web UI  : http://localhost:8080
+#   Airflow UI    : http://localhost:8081  (admin / admin)
 
 # 2. Cài thư viện Python (nên dùng venv)
 python -m venv .venv && source .venv/bin/activate
@@ -88,6 +90,43 @@ MinIO (bronze/*.parquet) ◄── hive-metastore ◄── trino
   toàn chạy lại nhiều lần (dùng `CREATE ... IF NOT EXISTS` +
   `sync_partition_metadata`).
 
+## Orchestration (Airflow)
+
+DAG `bronze_ingest_daily` (`airflow/dags/bronze_ingest_dag.py`) gọi lại đúng
+CLI ở trên qua `BashOperator`, không viết lại logic ingest:
+
+```
+[ingest_symbols]     ┐
+                     ├─► [register_trino_tables]   (sync partition mới vào Trino)
+[ingest_ohlcv_vn30]   ┘
+```
+
+- Lịch: `30 15 * * 1-5` giờ **Asia/Ho_Chi_Minh** (15:30, thứ 2-6 — sau giờ
+  đóng cửa phiên ~15:00).
+- Phạm vi: rổ **VN30**, cửa sổ **trailing 5 ngày** mỗi lần chạy (start = ngày
+  chạy − 5, end = ngày chạy) — an toàn nếu DAG lỡ chạy trễ/miss 1 hôm, không lo
+  trùng dữ liệu vì `BronzeWriter` ghi đè theo partition.
+- DAG mặc định **paused** khi mới bật lần đầu — vào UI
+  (`http://localhost:8081`, admin/admin) bật (unpause) DAG `bronze_ingest_daily`
+  để nó tự chạy theo lịch, hoặc bấm Trigger để chạy thử ngay.
+- Container Airflow build từ `airflow/Dockerfile` (extend image chính thức +
+  cài `requirements.txt`), mount thẳng project vào `/opt/airflow/vnstock` nên
+  không cần đóng gói lại khi sửa code/DAG — chỉ cần sửa file, Airflow tự nạp
+  lại DAG (không cần rebuild trừ khi đổi `requirements.txt`).
+- **Rate limit vnstock**: mặc định Guest (20 req/phút) khá sát giới hạn khi
+  chạy tự động không giám sát — DAG dùng `INGEST_SLEEP_SECONDS=6` (cao hơn
+  mặc định `.env` là 3s) để có biên an toàn. Nếu vẫn gặp lỗi rate limit, nên
+  đăng ký API key Community (60 req/phút, miễn phí tại
+  https://vnstocks.com/login) và đặt `VNSTOCK_API_KEY` trong `.env`.
+- **Resume khi bị rate limit giữa chừng** (vd. backfill dài ngày qua
+  `run_bronze_ingest.py ohlcv`): thư viện vnstock tự `sys.exit()` khi chạm
+  rate limit thay vì raise lỗi bình thường, nên cả lệnh dừng ngay lập tức.
+  Mặc định `ohlcv` sẽ **tự bỏ qua các mã đã có dữ liệu Bronze trong ngày
+  UTC hiện tại** trước khi gọi vnstock — cứ đợi hết cửa sổ rate limit rồi
+  chạy lại **y nguyên câu lệnh cũ**, các mã đã xong sẽ được skip, chỉ nạp
+  tiếp mã còn thiếu. Dùng `--force` nếu muốn nạp lại toàn bộ bất kể đã có
+  dữ liệu hay chưa.
+
 ## Kiểm thử (không cần MinIO/vnstock)
 
 ```bash
@@ -110,6 +149,12 @@ Bronze: metadata, partition, và idempotency (ghi lại cùng ngày/mã không n
   `.env` và tăng/giảm `INGEST_SLEEP_SECONDS` cho phù hợp.
 - Toàn bộ phần phụ thuộc vnstock nằm gọn trong `src/fetchers/vnstock_fetcher.py`.
   Nếu API đổi, chỉ cần sửa file này.
+- `Market().equity().ohlcv()` có tham số `count` (mặc định 100) luôn được
+  truyền xuống thành `count_back`, và provider (vd. KBS) luôn `.tail(count_back)`
+  **sau khi** đã lọc theo `start`/`end` — nếu không set `count` đủ lớn, khoảng
+  ngày rộng vẫn bị cắt còn đúng 100 dòng cuối bất kể `start`/`end` yêu cầu bao
+  nhiêu. `vnstock_fetcher.py` đã tự tính `count` từ khoảng `start`-`end` để
+  tránh bị cắt (xem `_estimate_count`).
 
 ## Cấu trúc thư mục
 
@@ -124,12 +169,13 @@ scripts/run_bronze_ingest.py    # CLI ingest
 scripts/register_trino_tables.py # đăng ký bảng Trino + sync partition
 trino/catalog/hive.properties   # cấu hình Trino Hive connector
 hive-metastore/conf/            # JDBC (MySQL) + S3A (MinIO) cho Hive Metastore
+airflow/Dockerfile               # image Airflow tuỳ biến (+ requirements.txt)
+airflow/dags/bronze_ingest_dag.py # DAG ingest hằng ngày + sync Trino
 tests/test_bronze_writer.py     # test tầng Bronze
 ```
 
 ## Bước tiếp theo (chưa làm ở phase này)
 
-- Bọc `run_bronze_ingest.py` thành Airflow DAG (schedule hằng ngày sau phiên).
 - Silver: chuẩn hoá schema, ép kiểu, khử trùng lặp → ghi bảng Iceberg (đổi
   catalog Trino từ Hive external table sang Iceberg connector).
 - RAG (FastEmbed + Qdrant), Metric (Cube.js), Reports (Metabase), Chainlit.

@@ -70,6 +70,15 @@ class BronzeWriter:
         self._write_parquet(enriched, path)
         return len(enriched)
 
+    def has_ohlcv_partition(self, symbol: str, ingest_date: str) -> bool:
+        """Batch trước đã ghi Bronze cho (ingest_date, symbol) này chưa.
+
+        Dùng để resume khi 1 batch bị ngắt giữa chừng (vd. rate limit
+        vnstock): bỏ qua mã đã có, chỉ nạp lại mã còn thiếu.
+        """
+        partition_dir = f"{self.base_uri}/ohlcv/ingest_date={ingest_date}/symbol={symbol}"
+        return self.fs.exists(partition_dir)
+
     # ------------------------------------------------------------------ #
     # Ghi danh sách mã (bảng tham chiếu)
     # ------------------------------------------------------------------ #

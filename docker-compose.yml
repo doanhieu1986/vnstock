@@ -1,6 +1,38 @@
 # MinIO — object store đóng vai trò Data Lake cho tầng Bronze.
-# + Hive Metastore (Postgres-backed) và Trino — query engine đọc trực tiếp Bronze
-#   (Parquet phân vùng thư mục, chưa phải Iceberg). Spark/Airflow sẽ gắn vào sau.
+# + Hive Metastore (MySQL-backed) và Trino — query engine đọc trực tiếp Bronze
+#   (Parquet phân vùng thư mục, chưa phải Iceberg).
+# + Airflow — schedule ingest hằng ngày (DAG ở airflow/dags/, gọi lại CLI có sẵn).
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow_db
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/vnstock/airflow/dags
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # Pipeline nói chuyện qua hostname trong mạng compose, khác localhost mà .env dùng khi chạy trên host.
+    MINIO_ENDPOINT: http://minio:9000
+    MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+    MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    LAKEHOUSE_BUCKET: ${LAKEHOUSE_BUCKET:-lakehouse}
+    BRONZE_PREFIX: ${BRONZE_PREFIX:-bronze}
+    VNSTOCK_SOURCE: ${VNSTOCK_SOURCE:-KBS}
+    VNSTOCK_API_KEY: ${VNSTOCK_API_KEY:-}
+    # Cao hơn .env (3s): mỗi lần gọi OHLCV có vẻ tốn hơn 1 request thực tế
+    # (quan sát được: sleep 3-4s vẫn chạm rate limit Guest ~20 req/phút giữa
+    # chừng VN30). DAG chạy không người giám sát nên cần biên an toàn rộng hơn.
+    INGEST_SLEEP_SECONDS: ${INGEST_SLEEP_SECONDS:-6}
+    TRINO_HOST: trino
+    TRINO_PORT: 8080
+  volumes:
+    - .:/opt/airflow/vnstock
+    - ./airflow/logs:/opt/airflow/logs
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+
 services:
   minio:
     image: minio/minio:latest          # có image arm64 chính thức, chạy tốt trên M-series
@@ -83,6 +115,55 @@ services:
     volumes:
       - ./trino/catalog:/etc/trino/catalog:ro
 
+  # DB backend riêng cho Airflow metadata (tách biệt với metastore-db của Trino).
+  airflow-db:
+    image: postgres:16
+    container_name: lakehouse-airflow-db
+    environment:
+      POSTGRES_DB: airflow_db
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Chạy 1 lần: migrate DB metadata + tạo user admin (admin/admin, dev-only).
+  airflow-init:
+    <<: *airflow-common
+    container_name: lakehouse-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - airflow db migrate && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: lakehouse-airflow-webserver
+    command: webserver
+    ports:
+      - "8081:8080"          # 8080 host đã dùng cho Trino UI
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: lakehouse-airflow-scheduler
+    command: scheduler
+    depends_on:
+      airflow-db:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
 volumes:
   minio-data:
   metastore-db-data:
+  airflow-db-data:

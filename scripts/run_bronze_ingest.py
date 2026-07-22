@@ -46,6 +46,10 @@ def main() -> None:
     p_ohlcv.add_argument("--interval", default="1D", help="1D, 1H, ... (mặc định 1D)")
     p_ohlcv.add_argument("--limit", type=int, default=None, help="Giới hạn số mã (test)")
     p_ohlcv.add_argument("--sleep", type=float, default=None, help="Giãn cách (giây)")
+    p_ohlcv.add_argument(
+        "--force", action="store_true",
+        help="Nạp lại dù đã có dữ liệu hôm nay cho mã đó (mặc định tự bỏ qua để resume sau khi bị rate limit)",
+    )
 
     args = parser.parse_args()
 
@@ -63,6 +67,7 @@ def main() -> None:
         end=args.end,
         interval=args.interval,
         sleep_seconds=args.sleep,
+        skip_existing=not args.force,
     )
 
 
