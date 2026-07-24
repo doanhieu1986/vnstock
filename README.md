@@ -137,13 +137,31 @@ print(cur.fetchall())
 ## Orchestration (Airflow)
 
 DAG `bronze_ingest_daily` (`airflow/dags/bronze_ingest_dag.py`) gọi lại đúng
-CLI ở trên qua `BashOperator`, không viết lại logic ingest:
+CLI/job ở trên qua `BashOperator`, không viết lại logic ingest/xử lý:
 
 ```
-[ingest_symbols]     ┐
-                     ├─► [register_trino_tables]   (sync partition mới vào Trino)
-[ingest_ohlcv_vn30]   ┘
+[ingest_symbols]     ┬─► [register_trino_tables]   (sync Bronze/Hive)
+                     └─► [spark_silver_symbols]     (Bronze -> Silver/Iceberg)
+
+[ingest_ohlcv_vn30]  ┬─► [register_trino_tables]
+                     └─► [spark_silver_ohlcv]
 ```
+
+`register_trino_tables` (Bronze/Hive) và `spark_silver_*` (Silver/Iceberg) là
+2 catalog độc lập, không phụ thuộc nhau — chạy song song sau khi ingest xong.
+
+**Task `spark_silver_*` gọi `docker exec lakehouse-spark spark-submit ...`**
+— container Airflow không tự chạy Spark, nó exec lệnh vào container `spark`
+riêng. Cần mount Docker socket (`/var/run/docker.sock`) vào
+`airflow-scheduler` + cài Docker CLI trong `airflow/Dockerfile` (chỉ
+scheduler cần, vì LocalExecutor chạy task ngay trong container đó).
+**Đây là pattern chỉ dùng cho dev/local** — nó cho container Airflow quyền
+điều khiển toàn bộ Docker host (tương đương root), chấp nhận được vì chỉ
+chạy trên máy cá nhân. Ở production, không exec thẳng vào container khác:
+dùng `SparkSubmitOperator` (Spark cluster thật qua network,
+`spark://host:7077`) hoặc `KubernetesPodOperator`/managed service (EMR,
+Dataproc, Databricks) — Airflow chỉ cần địa chỉ mạng + credentials, không
+cần shell access vào compute engine.
 
 - Lịch: `30 15 * * 1-5` giờ **Asia/Ho_Chi_Minh** (15:30, thứ 2-6 — sau giờ
   đóng cửa phiên ~15:00).
@@ -218,13 +236,11 @@ spark/Dockerfile                 # image Spark tuỳ biến (+ jar Iceberg/hadoo
 spark/conf/spark-defaults.conf   # Iceberg catalog + S3A config cho Spark
 spark/jobs/silver_ohlcv.py       # Bronze -> Silver: OHLCV (dedup + Iceberg)
 spark/jobs/silver_symbols.py     # Bronze -> Silver: danh sách mã
-airflow/Dockerfile               # image Airflow tuỳ biến (+ requirements.txt)
-airflow/dags/bronze_ingest_dag.py # DAG ingest hằng ngày + sync Trino
+airflow/Dockerfile               # image Airflow tuỳ biến (+ requirements.txt, Docker CLI)
+airflow/dags/bronze_ingest_dag.py # DAG ingest -> sync Trino + Silver hằng ngày
 tests/test_bronze_writer.py     # test tầng Bronze
 ```
 
 ## Bước tiếp theo (chưa làm ở phase này)
 
-- Nối job Silver (`spark/jobs/`) vào Airflow DAG để tự chạy hằng ngày sau
-  ingest (hiện chỉ chạy tay).
 - RAG (FastEmbed + Qdrant), Metric (Cube.js), Reports (Metabase), Chainlit.

@@ -6,6 +6,7 @@ x-airflow-common: &airflow-common
   build:
     context: .
     dockerfile: airflow/Dockerfile
+  image: vnstock-airflow:latest
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow_db
@@ -170,6 +171,14 @@ services:
     <<: *airflow-common
     container_name: lakehouse-airflow-scheduler
     command: scheduler
+    # Chỉ scheduler mới cần Docker socket: LocalExecutor chạy task ngay trong
+    # container này, và task spark_silver_* gọi `docker exec` vào container
+    # spark. Pattern chỉ dùng cho dev/local (xem README) — production dùng
+    # SparkSubmitOperator/K8s qua network, không exec thẳng container khác.
+    volumes:
+      - .:/opt/airflow/vnstock
+      - ./airflow/logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       airflow-db:
         condition: service_healthy

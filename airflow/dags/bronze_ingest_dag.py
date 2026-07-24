@@ -1,8 +1,14 @@
-"""DAG: nạp vnstock -> Bronze hằng ngày sau phiên, rồi sync bảng Trino.
+"""DAG: nạp vnstock -> Bronze hằng ngày sau phiên, sync bảng Trino, rồi build Silver.
 
-Gọi lại CLI có sẵn (scripts/run_bronze_ingest.py, scripts/register_trino_tables.py)
-qua BashOperator thay vì viết lại logic ingest — cả hai script tự sys.path.insert
-theo vị trí file nên chạy độc lập bằng full path, không cần chỉnh PYTHONPATH.
+Gọi lại CLI/job có sẵn qua BashOperator thay vì viết lại logic:
+- scripts/run_bronze_ingest.py, scripts/register_trino_tables.py: tự
+  sys.path.insert theo vị trí file nên chạy độc lập bằng full path.
+- spark/jobs/silver_*.py: chạy trong container `spark` riêng (không phải
+  container Airflow này) -> gọi qua `docker exec`. Cần mount Docker socket
+  vào container Airflow (xem docker-compose.yml, service airflow-scheduler).
+  Đây là pattern CHỈ DÙNG CHO DEV/LOCAL (xem README mục Orchestration) —
+  production nên dùng SparkSubmitOperator/K8s qua network thay vì exec
+  thẳng vào container khác.
 """
 from __future__ import annotations
 
@@ -39,4 +45,19 @@ with DAG(
         bash_command=f"python {PROJECT_DIR}/scripts/register_trino_tables.py",
     )
 
-    [ingest_symbols, ingest_ohlcv_vn30] >> register_trino_tables
+    spark_silver_symbols = BashOperator(
+        task_id="spark_silver_symbols",
+        bash_command="docker exec lakehouse-spark /opt/spark/bin/spark-submit /opt/spark-jobs/silver_symbols.py",
+    )
+
+    spark_silver_ohlcv = BashOperator(
+        task_id="spark_silver_ohlcv",
+        bash_command="docker exec lakehouse-spark /opt/spark/bin/spark-submit /opt/spark-jobs/silver_ohlcv.py",
+    )
+
+    # register_trino_tables chỉ sync Bronze/Hive, độc lập với Silver/Iceberg
+    # -> không cần chờ nhau, chạy song song sau khi ingest xong.
+    ingest_symbols >> register_trino_tables
+    ingest_ohlcv_vn30 >> register_trino_tables
+    ingest_symbols >> spark_silver_symbols
+    ingest_ohlcv_vn30 >> spark_silver_ohlcv
