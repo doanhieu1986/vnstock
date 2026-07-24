@@ -189,6 +189,68 @@ cần shell access vào compute engine.
   tiếp mã còn thiếu. Dùng `--force` nếu muốn nạp lại toàn bộ bất kể đã có
   dữ liệu hay chưa.
 
+## Metric (Cube.js)
+
+Semantic layer đọc Silver qua Trino (catalog `iceberg`). Driver Trino chính
+thức của Cube (`@cubejs-backend/trino-driver`) nói chuyện qua REST API của
+Trino (`presto-client`, HTTP thuần) — không cần JDBC/JVM, dùng image
+`cubejs/cube` bản thường.
+
+```bash
+docker compose up -d cube
+#   Playground + REST API: http://localhost:4000
+
+# Query thử qua REST API (dev mode: không cần JWT)
+python3 -c "
+import urllib.parse, json, urllib.request
+query = {'measures': ['Ohlcv.totalVolume', 'Ohlcv.count'], 'dimensions': ['Ohlcv.symbol']}
+url = 'http://localhost:4000/cubejs-api/v1/load?query=' + urllib.parse.quote(json.dumps(query))
+print(json.load(urllib.request.urlopen(url))['data'][:5])
+"
+```
+
+- Schema (cube): `cube/model/cubes/Ohlcv.js`, `cube/model/cubes/Symbols.js` —
+  **lưu ý đường dẫn `model/cubes/`**, không phải `schema/` (convention cũ
+  của Cube.js đời trước — image `cubejs/cube` hiện tại chỉ nạp cube từ
+  `/cube/conf/model/`, mount sai chỗ sẽ thấy `meta` trả về `cubes: []` mà
+  không báo lỗi gì).
+- `CUBEJS_DEV_MODE=true` tắt luôn xác thực JWT cho REST API — tiện dev,
+  **phải đổi khi lên môi trường thật** (set `NODE_ENV=production` + ký JWT
+  bằng `CUBEJS_API_SECRET`).
+
+## Reports (Metabase)
+
+Dashboard đọc Silver qua Trino. Metabase chọn driver tên **"Starburst"**
+trong UI — driver này build-in trong Metabase OSS và dùng thẳng
+`io.trino:trino-jdbc` (JDBC driver Trino chính chủ), **không phải** driver
+"Presto" (dùng JDBC driver PrestoDB cũ, không đảm bảo tương thích Trino
+mới). Không cần cài plugin/jar rời.
+
+```bash
+docker compose up -d metabase-db metabase
+#   UI: http://localhost:3000
+```
+
+Setup lần đầu (tạo admin + nối Trino) làm qua Metabase Setup API thay vì
+wizard trên UI — không lưu thành script trong repo (chỉ chạy 1 lần, giống
+cách tạo admin Airflow qua CLI):
+
+```bash
+TOKEN=$(curl -s http://localhost:3000/api/session/properties | python3 -c "import json,sys;print(json.load(sys.stdin)['setup-token'])")
+
+curl -s -c /tmp/mb_cookies.txt -X POST http://localhost:3000/api/setup \
+  -H "Content-Type: application/json" \
+  -d "{\"token\":\"$TOKEN\",\"user\":{\"email\":\"admin@vnstock.local\",\"password\":\"<mật khẩu của bạn>\",\"first_name\":\"Admin\",\"last_name\":\"User\"},\"prefs\":{\"site_name\":\"VNStock Lakehouse\",\"site_locale\":\"en\"}}"
+
+curl -s -b /tmp/mb_cookies.txt -X POST http://localhost:3000/api/database \
+  -H "Content-Type: application/json" \
+  -d '{"engine":"starburst","name":"Silver (Trino)","details":{"host":"trino","port":8080,"catalog":"iceberg","ssl":false,"user":"metabase"},"is_full_sync":true}'
+```
+
+Sau đó đăng nhập UI bằng email/password vừa tạo, vào database "Silver
+(Trino)" để build câu hỏi/dashboard. Muốn thêm Bronze (raw) thì tạo thêm 1
+connection khác với `catalog: "hive"`.
+
 ## Kiểm thử (không cần MinIO/vnstock)
 
 ```bash
@@ -238,9 +300,14 @@ spark/jobs/silver_ohlcv.py       # Bronze -> Silver: OHLCV (dedup + Iceberg)
 spark/jobs/silver_symbols.py     # Bronze -> Silver: danh sách mã
 airflow/Dockerfile               # image Airflow tuỳ biến (+ requirements.txt, Docker CLI)
 airflow/dags/bronze_ingest_dag.py # DAG ingest -> sync Trino + Silver hằng ngày
+cube/model/cubes/Ohlcv.js         # Cube schema: measures/dimensions OHLCV
+cube/model/cubes/Symbols.js       # Cube schema: danh sách mã
 tests/test_bronze_writer.py     # test tầng Bronze
 ```
 
 ## Bước tiếp theo (chưa làm ở phase này)
 
-- RAG (FastEmbed + Qdrant), Metric (Cube.js), Reports (Metabase), Chainlit.
+- RAG (FastEmbed + Qdrant) — cần khảo sát API tin tức/báo cáo của vnstock
+  trước, thêm bước ingest (Bronze -> Silver) cho loại dữ liệu văn bản này
+  rồi mới embed.
+- Chainlit — giao diện hỏi đáp, cần chốt LLM provider trước khi build.
