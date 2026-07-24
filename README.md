@@ -90,6 +90,50 @@ MinIO (bronze/*.parquet) ◄── hive-metastore ◄── trino
   toàn chạy lại nhiều lần (dùng `CREATE ... IF NOT EXISTS` +
   `sync_partition_metadata`).
 
+## Data processing (Spark → Iceberg Silver)
+
+Bronze ghi theo `ingest_date` (ngày CHẠY batch), không phải ngày giao dịch —
+vì Airflow DAG ingest cửa sổ trailing 5 ngày mỗi lần chạy, cùng 1 giao dịch
+(symbol, time) có thể nằm ở nhiều `ingest_date` khác nhau. Silver dùng Spark
+để đọc toàn bộ Bronze, khử trùng lặp, ép kiểu, ghi thành bảng **Iceberg**
+thật (không phải external table như Bronze) — Iceberg tự đăng ký
+schema/snapshot vào `hive-metastore` (dùng lại metastore đã có cho Trino),
+nên **không cần script `register_trino_tables.py`** cho Silver, Trino tự
+thấy bảng qua catalog Iceberg mới.
+
+```bash
+# Chạy job Silver (Spark local[*] mode, tính lại toàn bộ mỗi lần — dữ liệu
+# còn nhỏ nên full recompute đơn giản và đúng hơn merge/upsert)
+docker compose up -d spark
+docker exec lakehouse-spark /opt/spark/bin/spark-submit /opt/spark-jobs/silver_ohlcv.py
+docker exec lakehouse-spark /opt/spark/bin/spark-submit /opt/spark-jobs/silver_symbols.py
+
+# Query qua Trino (catalog "iceberg", khác catalog "hive" của Bronze)
+python -c "
+import trino
+conn = trino.dbapi.connect(host='localhost', port=8080, user='vnstock', catalog='iceberg', schema='silver')
+cur = conn.cursor()
+cur.execute('SELECT symbol, time, close FROM iceberg.silver.ohlcv ORDER BY time DESC LIMIT 5')
+print(cur.fetchall())
+"
+```
+
+- Cấu hình Spark (Iceberg catalog trỏ `hive-metastore`, S3A trỏ MinIO):
+  `spark/conf/spark-defaults.conf`. Image build từ `spark/Dockerfile`
+  (`apache/spark` + jar Iceberg/hadoop-aws — cần bản Java 17 vì Iceberg
+  runtime jar mới yêu cầu, base image Java 11 sẽ lỗi
+  `UnsupportedClassVersionError`).
+- Job: `spark/jobs/silver_ohlcv.py` (dedup theo `symbol, time`, giữ bản
+  `_ingested_at` mới nhất), `spark/jobs/silver_symbols.py` (dedup theo
+  `symbol`). Container `spark` không chạy thường trực — gọi qua
+  `docker exec`/`docker compose run` khi cần.
+- **Lưu ý Parquet timestamp**: Bronze ghi cột `time` bằng microsecond
+  (`datetime64[us]`) thay vì nanosecond mặc định của pandas — Spark 3.5
+  không đọc được Parquet `TIMESTAMP(NANOS)` (`_write_parquet` trong
+  `src/bronze/writer.py` tự ép kiểu trước khi ghi). Nếu có Parquet Bronze cũ
+  ghi từ trước khi sửa, cần rewrite lại (đổi kiểu cột `time` sang
+  `timestamp('us')`) thì Spark mới đọc được.
+
 ## Orchestration (Airflow)
 
 DAG `bronze_ingest_daily` (`airflow/dags/bronze_ingest_dag.py`) gọi lại đúng
@@ -167,8 +211,13 @@ src/pipelines/ingest_ohlcv.py   # pipeline OHLCV
 src/pipelines/ingest_symbols.py # pipeline danh sách mã
 scripts/run_bronze_ingest.py    # CLI ingest
 scripts/register_trino_tables.py # đăng ký bảng Trino + sync partition
-trino/catalog/hive.properties   # cấu hình Trino Hive connector
+trino/catalog/hive.properties   # cấu hình Trino Hive connector (Bronze)
+trino/catalog/iceberg.properties # cấu hình Trino Iceberg connector (Silver)
 hive-metastore/conf/            # JDBC (MySQL) + S3A (MinIO) cho Hive Metastore
+spark/Dockerfile                 # image Spark tuỳ biến (+ jar Iceberg/hadoop-aws)
+spark/conf/spark-defaults.conf   # Iceberg catalog + S3A config cho Spark
+spark/jobs/silver_ohlcv.py       # Bronze -> Silver: OHLCV (dedup + Iceberg)
+spark/jobs/silver_symbols.py     # Bronze -> Silver: danh sách mã
 airflow/Dockerfile               # image Airflow tuỳ biến (+ requirements.txt)
 airflow/dags/bronze_ingest_dag.py # DAG ingest hằng ngày + sync Trino
 tests/test_bronze_writer.py     # test tầng Bronze
@@ -176,6 +225,6 @@ tests/test_bronze_writer.py     # test tầng Bronze
 
 ## Bước tiếp theo (chưa làm ở phase này)
 
-- Silver: chuẩn hoá schema, ép kiểu, khử trùng lặp → ghi bảng Iceberg (đổi
-  catalog Trino từ Hive external table sang Iceberg connector).
+- Nối job Silver (`spark/jobs/`) vào Airflow DAG để tự chạy hằng ngày sau
+  ingest (hiện chỉ chạy tay).
 - RAG (FastEmbed + Qdrant), Metric (Cube.js), Reports (Metabase), Chainlit.

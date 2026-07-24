@@ -115,6 +115,19 @@ services:
     volumes:
       - ./trino/catalog:/etc/trino/catalog:ro
 
+  # Data processing: Bronze -> Silver (Iceberg), dùng lại hive-metastore làm catalog.
+  # Không chạy thường trực — gọi qua `docker compose run --rm spark spark-submit ...`.
+  spark:
+    build:
+      context: .
+      dockerfile: spark/Dockerfile
+    container_name: lakehouse-spark
+    depends_on:
+      - hive-metastore
+    volumes:
+      - ./spark/jobs:/opt/spark-jobs:ro
+    entrypoint: ["tail", "-f", "/dev/null"]
+
   # DB backend riêng cho Airflow metadata (tách biệt với metastore-db của Trino).
   airflow-db:
     image: postgres:16

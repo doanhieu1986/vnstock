@@ -155,6 +155,14 @@ class BronzeWriter:
         self.fs.makedirs(partition_dir, exist_ok=True)
 
     def _write_parquet(self, df: pd.DataFrame, path: str) -> None:
+        # Ep cot datetime ve microsecond: pandas mac dinh datetime64[ns] -> Parquet
+        # TIMESTAMP(NANOS), Spark khong doc duoc kieu nay (chi ho tro MICROS/MILLIS).
+        datetime_cols = df.select_dtypes(include=["datetime64[ns]"]).columns
+        if len(datetime_cols) > 0:
+            df = df.copy()
+            for col in datetime_cols:
+                df[col] = df[col].astype("datetime64[us]")
+
         table = pa.Table.from_pandas(df, preserve_index=False)
         buf = io.BytesIO()
         pq.write_table(table, buf, compression="snappy")
